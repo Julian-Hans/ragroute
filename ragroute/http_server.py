@@ -174,6 +174,7 @@ class HTTPServer:
                     routing_data = await self.router_receiver.recv_json()
                     query_id = routing_data["query_id"]
                     data_sources = routing_data["data_sources"]
+                    source_scores = routing_data.get("source_scores", {})
                     embeddings = routing_data["embeddings"]
                     embedding_time = routing_data["embedding_time"]
                     selection_time = routing_data["selection_time"]
@@ -187,6 +188,7 @@ class HTTPServer:
                         # Update pending clients
                         self.active_queries[query_id]["pending_data_sources"] = set(client_ids)
                         self.active_queries[query_id]["metadata"]["data_sources"] = data_sources
+                        self.active_queries[query_id]["metadata"]["source_scores"] = source_scores
                         self.active_queries[query_id]["metadata"]["embedding_time"] = embedding_time
                         self.active_queries[query_id]["metadata"]["selection_time"] = selection_time
                         self.active_queries[query_id]["metadata"]["data_sources_stats"] = {}

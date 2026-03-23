@@ -66,8 +66,9 @@ class AnglEModel(CustomDEModel):
                 return_tensors='pt',
                 max_length=512,
             ).to(self.device)
-            last_hidden_state = self.model(**inputs, return_dict=True).last_hidden_state
-            embeddings = self.pooling(last_hidden_state, inputs['attention_mask'])
+            with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+                last_hidden_state = self.model(**inputs, return_dict=True).last_hidden_state
+            embeddings = self.pooling(last_hidden_state.float(), inputs['attention_mask'])
             if self.normalize_embeddings:
                 embeddings = torch.nn.functional.normalize(embeddings, dim=-1)
             embeddings = cast(torch.Tensor, embeddings)
@@ -104,40 +105,39 @@ class E5Model(CustomDEModel):
         self.pooling_method = "mean"
         self.score_function = "cos_sim"
 
-    def encode_queries(self, queries: List[str], **kwargs) -> np.ndarray:
+    def encode_queries(self, queries: List[str], batch_size: int = 512, **kwargs) -> np.ndarray:
         input_texts = ['query: {}'.format(q) for q in queries]
-        return self._do_encode(input_texts)
+        return self._do_encode(input_texts, batch_size=batch_size)
 
-    def encode_corpus(self, corpus: List[Dict[str, str]], **kwargs) -> np.ndarray:
+    def encode_corpus(self, corpus: List[Dict[str, str]], batch_size: int = 512, **kwargs) -> np.ndarray:
         input_texts = ['{} {}'.format(doc.get('title', ''), doc['text']).strip() for doc in corpus]
         input_texts = ['passage: {}'.format(t) for t in input_texts]
-        return self._do_encode(input_texts)
+        return self._do_encode(input_texts, batch_size=batch_size)
 
     @torch.no_grad()
-    def _do_encode(self, input_texts: List[str]) -> np.ndarray:
+    def _do_encode(self, input_texts: List[str], batch_size: int = 512) -> np.ndarray:
         dataset: Dataset = Dataset.from_dict({'contents': input_texts})
         dataset.set_transform(partial(_transform_func, self.tokenizer))
 
         data_collator = DataCollatorWithPadding(self.tokenizer, pad_to_multiple_of=8)
         data_loader = DataLoader(
             dataset,
-            batch_size=128,   #  * self.gpu_count,
+            batch_size=batch_size,
             shuffle=False,
             drop_last=False,
-            num_workers=0,
+            num_workers=4,
             collate_fn=data_collator,
             pin_memory=True)
 
         encoded_embeds = []
-        # for batch_dict in tqdm(data_loader, desc='encoding', mininterval=10):
         for batch_dict in data_loader:
             if self.cuda:
                 batch_dict = move_to_cuda(batch_dict)
 
-            # with torch.cuda.amp.autocast():
-            outputs = self.encoder(**batch_dict)
+            with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+                outputs = self.encoder(**batch_dict)
             embeds = self._pooling(outputs.last_hidden_state, batch_dict['attention_mask'])
-            encoded_embeds.append(embeds.cpu().numpy())
+            encoded_embeds.append(embeds.float().cpu().numpy())
         return np.concatenate(encoded_embeds, axis=0)
 
     def _pooling(self, last_hidden_state: torch.Tensor, attention_mask: torch.Tensor):

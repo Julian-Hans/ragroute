@@ -1,3 +1,4 @@
+import argparse
 import os
 import pickle
 import json
@@ -11,6 +12,13 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 import random
 
+parser = argparse.ArgumentParser()
+parser.add_argument("--data-dir", default="/home/julian/ragroute/data/feb4rag_embeddings",
+                    help="Directory containing embeddings/ from prepare_feb4rag_data.py")
+parser.add_argument("--output-dir", default="/home/julian/ragroute/data/feb4rag_router",
+                    help="Directory to save trained model and split.json")
+args = parser.parse_args()
+
 def set_seed(seed=42):
     random.seed(seed)
     np.random.seed(seed)
@@ -22,15 +30,18 @@ def set_seed(seed=42):
 
 set_seed()
 
-def load_data(include_source_id=True, include_centroid=True, split_path="split.json"):
-    with open("embeddings/routing_grouped_by_query.pkl", "rb") as f:
+def load_data(data_dir, output_dir, include_source_id=True, include_centroid=True):
+    embeddings_dir = os.path.join(data_dir, "embeddings")
+    split_path = os.path.join(output_dir, "split.json")
+
+    with open(os.path.join(embeddings_dir, "routing_grouped_by_query.pkl"), "rb") as f:
         query_to_data = pickle.load(f)
 
-    with open("embeddings/encoder_dims.json", "r") as f:
+    with open(os.path.join(embeddings_dir, "encoder_dims.json"), "r") as f:
         encoder_dims = json.load(f)
     max_dim = max(encoder_dims.values())
 
-    with open("embeddings/source_id_map.json", "r") as f:
+    with open(os.path.join(embeddings_dir, "source_id_map.json"), "r") as f:
         source_to_id = json.load(f)
     num_sources = len(source_to_id)
 
@@ -82,7 +93,9 @@ def load_data(include_source_id=True, include_centroid=True, split_path="split.j
 
 include_source_id = True
 include_centroid = True
-(X_train, y_train), (X_val, y_val), (X_test, y_test), _ = load_data(include_source_id, include_centroid)
+os.makedirs(args.output_dir, exist_ok=True)
+(X_train, y_train), (X_val, y_val), (X_test, y_test), _ = load_data(
+    args.data_dir, args.output_dir, include_source_id, include_centroid)
 
 # === 4. Torch Dataset ===
 class RoutingDataset(Dataset):
@@ -177,7 +190,7 @@ def evaluate_with_metrics(loader, threshold=0.5):
 # === 8. Training Loop ===
 print("\nStarting training...")
 best_f1 = 0
-best_model_path = "router_best_model.pt"
+best_model_path = os.path.join(args.output_dir, "router_best_model.pt")
 
 num_epochs = 150
 for epoch in range(1, num_epochs + 1):

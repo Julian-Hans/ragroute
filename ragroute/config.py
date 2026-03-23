@@ -13,14 +13,14 @@ HTTP_PORT = 8000
 MAX_QUEUE_SIZE = 100
 
 # For loading the models
-MODELS_USR_DIR = "/mnt/nfs/home/dpetresc"
+MODELS_USR_DIR = os.environ.get("RAGROUTE_MODELS_DIR", "/mnt/nfs/home/dpetresc")
 MODELS_MEDRAG_DIR = os.path.join(MODELS_USR_DIR, "MedRAG", "corpus")
-MODELS_FEB4RAG_DIR = os.path.join(MODELS_USR_DIR, "FeB4RAG")
+MODELS_FEB4RAG_DIR = os.environ.get("RAGROUTE_FEB4RAG_MODELS_DIR", os.path.join(MODELS_USR_DIR, "FeB4RAG"))
 
 # For loading the data
-USR_DIR = "/mnt/nfs/home/dpetresc"
+USR_DIR = os.environ.get("RAGROUTE_DATA_DIR", "/mnt/nfs/home/dpetresc")
 MEDRAG_DIR = os.path.join(USR_DIR, "MedRAG", "corpus")
-FEB4RAG_DIR = os.path.join(USR_DIR, "FeB4RAG")
+FEB4RAG_DIR = os.environ.get("RAGROUTE_FEB4RAG_DIR", os.path.join(USR_DIR, "FeB4RAG"))
 WIKIPEDIA_DIR = os.path.join(USR_DIR, "wiki_dataset", "dpr_wiki_index")
 
 # If we're in simulation mode, these are the delays for each component (in seconds)

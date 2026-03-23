@@ -218,27 +218,32 @@ class Router:
             logger.info("Process task cancelled")
             raise
 
-    def select_relevant_sources(self, query_embeddings: Dict[str, torch.Tensor]) -> List[str]:
+    def select_relevant_sources(self, query_embeddings: Dict[str, torch.Tensor]):
         if self.simulate:  # Return all data sources in simulation mode
-            return self.data_sources
+            scores = {ds: 1.0 for ds in self.data_sources}
+            return self.data_sources, scores
 
         if self.routing_strategy == "ragroute":
             return self.select_relevant_sources_ragroute(query_embeddings)
         elif self.routing_strategy == "all":
-            return self.data_sources
+            scores = {ds: 1.0 for ds in self.data_sources}
+            return self.data_sources, scores
         elif self.routing_strategy == "random":
             if self.dataset == "medrag":
-                return random.sample(self.data_sources, 2)
+                selected = random.sample(self.data_sources, 2)
             elif self.dataset == "feb4rag":
-                return random.sample(self.data_sources, 9)
+                selected = random.sample(self.data_sources, 9)
             elif self.dataset == "wikipedia":
-                return random.sample(self.data_sources, 2)
+                selected = random.sample(self.data_sources, 2)
+            scores = {ds: (1.0 if ds in selected else 0.0) for ds in self.data_sources}
+            return selected, scores
         elif self.routing_strategy == "none":
-            return []
+            scores = {ds: 0.0 for ds in self.data_sources}
+            return [], scores
         else:
             raise ValueError(f"Unknown routing strategy: {self.routing_strategy}")
 
-    def select_relevant_sources_ragroute(self, query_embeddings: Dict[str, torch.Tensor]) -> List[str]:
+    def select_relevant_sources_ragroute(self, query_embeddings: Dict[str, torch.Tensor]):
         inputs = []
 
         # First, we pad the query embeddings to the maximum length
@@ -265,7 +270,7 @@ class Router:
                 features = np.concatenate([features, source_id_vec])
 
             inputs.append(features)
-        
+
         if self.dataset == "medrag" or self.dataset == "wikipedia":
             inputs = self.scaler.transform(inputs)
         input_tensor = torch.tensor(inputs, dtype=torch.float32).to(self.device)
@@ -274,13 +279,15 @@ class Router:
             outputs = self.router(input_tensor)
             outputs = outputs.view(-1)
             probabilities = torch.sigmoid(outputs)
-            if self.dataset == "medrag":	
+            if self.dataset == "medrag":
                 predictions = (probabilities > 0.4924).cpu().numpy()
             else:
                 predictions = (probabilities > 0.5).cpu().numpy()
-        
+
+        probs_np = probabilities.cpu().numpy()
+        source_scores = {corpus: float(probs_np[i]) for i, corpus in enumerate(self.data_sources)}
         sources_corpora = [corpus for prediction, corpus in zip(predictions, self.data_sources) if prediction]
-        return sources_corpora
+        return sources_corpora, source_scores
 
     def encode_query(self, query):
         if self.simulate:
@@ -311,7 +318,7 @@ class Router:
         embed_time = time.time() - start_time
 
         start_time = time.time()
-        sources_corpora = self.select_relevant_sources(query_embeddings)
+        sources_corpora, source_scores = self.select_relevant_sources(query_embeddings)
         select_time = time.time() - start_time
 
         serialized_embeddings = {}
@@ -320,10 +327,11 @@ class Router:
 
         if self.simulate:
             await asyncio.sleep(ROUTER_DELAY)
-        
+
         response = {
             "query_id": query_data["id"],
             "data_sources": sources_corpora,
+            "source_scores": source_scores,
             "embeddings": serialized_embeddings,
             "embedding_time": embed_time,
             "selection_time": select_time,

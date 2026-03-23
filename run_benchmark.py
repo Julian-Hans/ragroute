@@ -34,11 +34,13 @@ async def main():
         ds_stats_file: str = os.path.join("%s" % args.save_logs_dir, "ds_stats_%s_%s_%s.csv" % (args.benchmark, args.routing, args.questions))
         answer_file: str = os.path.join("%s" % args.save_logs_dir, "answers_%s_%s_%s.jsonl" % (args.benchmark, args.routing, args.questions))
         top_docs_file: str = os.path.join("%s" % args.save_logs_dir, "top_docs_%s_%s_%s.jsonl" % (args.benchmark, args.routing, args.questions))
+        source_scores_file: str = os.path.join("%s" % args.save_logs_dir, "source_scores_%s_%s_%s.jsonl" % (args.benchmark, args.routing, args.questions))
     else:
         benchmark_file: str = os.path.join("%s" % args.save_logs_dir, "benchmark_%s_%s.csv" % (args.benchmark, args.routing))
         ds_stats_file: str = os.path.join("%s" % args.save_logs_dir, "ds_stats_%s_%s.csv" % (args.benchmark, args.routing))
         answer_file: str = os.path.join("%s" % args.save_logs_dir, "answers_%s_%s.jsonl" % (args.benchmark, args.routing))
         top_docs_file: str = os.path.join("%s" % args.save_logs_dir, "top_docs_%s_%s.jsonl" % (args.benchmark, args.routing))
+        source_scores_file: str = os.path.join("%s" % args.save_logs_dir, "source_scores_%s_%s.jsonl" % (args.benchmark, args.routing))
 
     if not os.path.exists(benchmark_file):
         with open(benchmark_file, "w") as f:
@@ -151,6 +153,10 @@ async def main():
                     with open(ds_stats_file, "a") as f:
                         for data_source, stats in metadata["data_sources_stats"].items():
                             f.write(f"{args.benchmark},{question_bank},{question_id},{data_source},{stats['duration']},{stats['message_size']}\n")
+
+                    if "source_scores" in metadata:
+                        with open(source_scores_file, "a") as f:
+                            f.write(json.dumps({"question_id": question_id, "source_scores": metadata["source_scores"]}) + "\n")
 
                     if args.benchmark == "MIRAGE":
                         print(f"--> Score: {num_correct}/{num_questions}")
