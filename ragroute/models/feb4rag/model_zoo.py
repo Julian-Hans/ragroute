@@ -89,11 +89,10 @@ class BeirModels(ModelClass):
     def download_models(self):
 
         for name in self.model_name_or_path:
-            # print("Downloading", name)
-            SentenceTransformer(model_name_or_path=name,
-                                cache_folder=self.model_dir)
-
-            # print("Finished loading")
+            local_path = os.path.join(self.model_dir, name.replace("/", "_"))
+            if not os.path.exists(local_path):
+                model = SentenceTransformer(model_name_or_path=name)
+                model.save(local_path)
 
     def load_model(self,  model_name, cuda=True, model_name_or_path=None):
         #print("HERE")

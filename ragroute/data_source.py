@@ -143,7 +143,7 @@ class DataSource:
     def retrieve_docs_fed4rag(self, query_embed, k):
         def idx2txt(ids):
             if self.name not in self.cache_jsonl:
-                corpus_path = os.path.join(self.dataset_dir, "dataset_creation/original_dataset", self.name, self.name, "corpus.jsonl")
+                corpus_path = os.path.join(self.dataset_dir, "original_dataset", self.name, self.name, "corpus.jsonl")
                 corpus = {}
                 with open(corpus_path, "r") as file:
                     for line in file:

@@ -18,8 +18,8 @@ from ragroute.models.feb4rag.model_zoo import CustomModel, BeirModels
 # USE online to compute everything from scratch for the system part
 k = 32
 device="cuda" if torch.cuda.is_available() else "cpu"
-usr_dir = "/mnt/nfs/home/mdevos"
-embeddings_usr_dir = "/mnt/nfs/home/dpetresc"
+usr_dir = "/home/julian/repos/FeB4RAG"
+embeddings_usr_dir = "/home/julian/repos/FeB4RAG"
 
 # questions file
 queries = {}

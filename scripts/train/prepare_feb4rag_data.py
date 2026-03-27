@@ -64,7 +64,7 @@ NUM_SOURCES = 13
 
 # Batch sizes tuned for H100 80GB
 CORPUS_BATCH_SIZES = {
-    "SGPT-5.8B-weightedmean-msmarco-specb-bitfit": 32,
+    "SGPT-5.8B-weightedmean-msmarco-specb-bitfit": 256,
     "UAE-Large-V1": 256,
     "e5-large": 256,
     "e5-base": 512,
@@ -75,7 +75,7 @@ CORPUS_BATCH_SIZES = {
 }
 
 QUERY_BATCH_SIZES = {
-    "SGPT-5.8B-weightedmean-msmarco-specb-bitfit": 64,
+    "SGPT-5.8B-weightedmean-msmarco-specb-bitfit": 512,
     "UAE-Large-V1": 512,
     "e5-large": 512,
     "e5-base": 1024,
@@ -112,6 +112,23 @@ def load_qrels(path, valid_sources):
     return dict(qrels)
 
 
+def read_corpus_sample(corpus_path, sample_size):
+    """Reservoir-sample sample_size docs from corpus JSONL in one pass."""
+    import random
+    reservoir = []
+    with open(corpus_path) as f:
+        for i, line in enumerate(f):
+            doc = json.loads(line)
+            item = {"title": doc.get("title", ""), "text": doc.get("text", "")}
+            if len(reservoir) < sample_size:
+                reservoir.append(item)
+            else:
+                j = random.randint(0, i)
+                if j < sample_size:
+                    reservoir[j] = item
+    return reservoir
+
+
 def read_corpus_streaming(corpus_path, chunk_size):
     """Yield chunks of corpus documents from JSONL file."""
     chunk = []
@@ -135,17 +152,24 @@ def count_corpus_lines(corpus_path):
     return count
 
 
-def compute_centroid(model, corpus_path, batch_size, chunk_size):
-    """Compute centroid (mean embedding) of a corpus via streaming."""
-    running_sum = None
-    total_count = 0
-
-    # Count lines for progress bar
+def compute_centroid(model, corpus_path, batch_size, chunk_size, sample_size=None):
+    """Compute centroid (mean embedding) of a corpus via streaming or random sample."""
     total_lines = count_corpus_lines(corpus_path)
-    total_chunks = (total_lines + chunk_size - 1) // chunk_size
     corpus_name = os.path.basename(os.path.dirname(os.path.dirname(corpus_path)))
+
+    if sample_size is not None and sample_size < total_lines:
+        print(f"  Corpus: {corpus_name} ({total_lines:,} docs, sampling {sample_size:,})")
+        docs = read_corpus_sample(corpus_path, sample_size)
+        embeddings = model.encode_corpus(docs, batch_size=batch_size, convert_to_tensor=False,
+                                         show_progress_bar=True)
+        centroid = embeddings.mean(axis=0).astype(np.float32)
+        return centroid, len(docs)
+
+    total_chunks = (total_lines + chunk_size - 1) // chunk_size
     print(f"  Corpus: {corpus_name} ({total_lines:,} docs, {total_chunks} chunks)")
 
+    running_sum = None
+    total_count = 0
     for chunk in tqdm(read_corpus_streaming(corpus_path, chunk_size),
                       total=total_chunks, desc=f"  Encoding {corpus_name}"):
         embeddings = model.encode_corpus(chunk, batch_size=batch_size, convert_to_tensor=False)
@@ -204,6 +228,8 @@ def parse_args():
                         help="Skip already-computed embeddings and centroids")
     parser.add_argument("--chunk-size", type=int, default=50000,
                         help="Documents per encoding chunk for centroid computation")
+    parser.add_argument("--sample-size", type=int, default=None,
+                        help="Randomly sample this many docs per corpus for centroid (None = all docs)")
     return parser.parse_args()
 
 
@@ -315,12 +341,14 @@ def main():
                 continue
 
             t0 = time.time()
-            centroid, num_docs = compute_centroid(model, corpus_path, c_batch, args.chunk_size)
+            centroid, num_docs = compute_centroid(model, corpus_path, c_batch, args.chunk_size,
+                                                  sample_size=args.sample_size)
             elapsed = time.time() - t0
             print(f"  Centroid computed in {elapsed:.1f}s ({num_docs:,} docs, dim={len(centroid)})")
 
             centroids_all[corpus] = centroid
-            stats = {"centroid": centroid.tolist(), "num_documents": num_docs}
+            stats = {"centroid": centroid.tolist(), "num_documents": num_docs,
+                     "sample_size": args.sample_size}
             with open(stats_path, "w") as f:
                 json.dump(stats, f)
             print(f"  Saved {stats_path}")
