@@ -22,9 +22,18 @@ def set_seed(seed=42):
     torch.backends.cudnn.benchmark = False
 
 
-def load_data(data_dir, output_dir, include_source_id=True, include_centroid=True):
+def load_data(data_dir, output_dir, include_source_id=True, include_centroid=True,
+              train_qids=None):
+    """Load pre-computed features and split into train/val(/test).
+
+    If train_qids is provided, only those queries are used for training
+    (with 20% held out for validation). No test set is created — evaluation
+    is handled externally.
+
+    Otherwise falls back to loading/creating a random train/val/test split
+    via split.json (legacy CLI mode).
+    """
     embeddings_dir = os.path.join(data_dir, "embeddings")
-    split_path = os.path.join(output_dir, "split.json")
 
     with open(os.path.join(embeddings_dir, "routing_grouped_by_query.pkl"), "rb") as f:
         query_to_data = pickle.load(f)
@@ -37,6 +46,35 @@ def load_data(data_dir, output_dir, include_source_id=True, include_centroid=Tru
         source_to_id = json.load(f)
     num_sources = len(source_to_id)
 
+    def flatten(qids):
+        return [ex for qid in qids for ex in query_to_data[qid]]
+
+    def unpack(data):
+        X_all, y_all = [], []
+        for x, y in data:
+            q_vec = x[:max_dim]
+            c_vec = x[max_dim:2*max_dim]
+            s_vec = x[2*max_dim:]
+            parts = [q_vec]
+            if include_centroid:
+                parts.append(c_vec)
+            if include_source_id:
+                parts.append(s_vec)
+            X_all.append(np.concatenate(parts))
+            y_all.append(y)
+        return np.array(X_all), np.array(y_all)
+
+    if train_qids is not None:
+        available = set(query_to_data.keys())
+        train_qids = [q for q in train_qids if q in available]
+        train_q, val_q = train_test_split(train_qids, test_size=0.2, random_state=42)
+        print(f"Custom split: {len(train_q)} train, {len(val_q)} val")
+        X_train, y_train = unpack(flatten(train_q))
+        X_val, y_val = unpack(flatten(val_q))
+        return (X_train, y_train), (X_val, y_val), None, num_sources if include_source_id else 0
+
+    # Legacy: random split with test set
+    split_path = os.path.join(output_dir, "split.json")
     query_ids = list(query_to_data.keys())
 
     if os.path.exists(split_path):
@@ -50,31 +88,10 @@ def load_data(data_dir, output_dir, include_source_id=True, include_centroid=Tru
         train_q, rest_q = train_test_split(query_ids, test_size=0.7, random_state=42)
         val_q, test_q = train_test_split(rest_q, test_size=6/7, random_state=42)
         split_data = {"train": train_q, "val": val_q, "test": test_q}
+        os.makedirs(output_dir, exist_ok=True)
         with open(split_path, "w") as f:
             json.dump(split_data, f, indent=2)
         print(f"Saved new split to {split_path}")
-
-    def flatten(qids):
-        return [ex for qid in qids for ex in query_to_data[qid]]
-
-    def unpack(data):
-        X_all = []
-        y_all = []
-        for x, y in data:
-            q_vec = x[:max_dim]
-            c_vec = x[max_dim:2*max_dim]
-            s_vec = x[2*max_dim:]
-
-            parts = [q_vec]
-            if include_centroid:
-                parts.append(c_vec)
-            if include_source_id:
-                parts.append(s_vec)
-
-            x_new = np.concatenate(parts)
-            X_all.append(x_new)
-            y_all.append(y)
-        return np.array(X_all), np.array(y_all)
 
     X_train, y_train = unpack(flatten(train_q))
     X_val, y_val = unpack(flatten(val_q))
@@ -151,7 +168,8 @@ def evaluate_with_metrics(model, loader, device, threshold=0.5):
     return acc, prec, recall, f1, auc
 
 
-def train_router(data_dir, output_dir, include_source_id=True, include_centroid=True, num_epochs=150):
+def train_router(data_dir, output_dir, include_source_id=True, include_centroid=True,
+                 num_epochs=150, train_qids=None):
     """Train a CorpusRouter model and save the best checkpoint.
 
     Args:
@@ -160,20 +178,25 @@ def train_router(data_dir, output_dir, include_source_id=True, include_centroid=
         include_source_id: Include one-hot source ID in features
         include_centroid: Include centroid embedding in features
         num_epochs: Number of training epochs
+        train_qids: Optional list of query IDs for training. If provided,
+            20% is held out for validation and no test set is created
+            (evaluation is handled externally). If None, uses a random
+            train/val/test split via split.json.
 
     Returns:
         Tuple of (model, best_model_path, test_metrics) where test_metrics is
-        (acc, prec, recall, f1, auc).
+        (acc, prec, recall, f1, auc) or None if no test set.
     """
     set_seed()
 
     os.makedirs(output_dir, exist_ok=True)
-    (X_train, y_train), (X_val, y_val), (X_test, y_test), _ = load_data(
-        data_dir, output_dir, include_source_id, include_centroid)
+    (X_train, y_train), (X_val, y_val), test_data, _ = load_data(
+        data_dir, output_dir, include_source_id, include_centroid,
+        train_qids=train_qids)
 
     train_loader = DataLoader(RoutingDataset(X_train, y_train), batch_size=128, shuffle=True)
     val_loader   = DataLoader(RoutingDataset(X_val, y_val), batch_size=128)
-    test_loader  = DataLoader(RoutingDataset(X_test, y_test), batch_size=128)
+    test_loader  = DataLoader(RoutingDataset(*test_data), batch_size=128) if test_data else None
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = CorpusRouter(input_dim=X_train.shape[1]).to(device)
@@ -228,8 +251,11 @@ def train_router(data_dir, output_dir, include_source_id=True, include_centroid=
 
     model.load_state_dict(torch.load(best_model_path))
     print("\nLoaded best model from disk.")
-    print("\nFinal Test Set Evaluation:")
-    test_metrics = evaluate_with_metrics(model, test_loader, device)
+
+    test_metrics = None
+    if test_loader is not None:
+        print("\nFinal Test Set Evaluation:")
+        test_metrics = evaluate_with_metrics(model, test_loader, device)
 
     return model, best_model_path, test_metrics
 
