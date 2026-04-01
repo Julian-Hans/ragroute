@@ -1,4 +1,3 @@
-import argparse
 import os
 import pickle
 import json
@@ -12,23 +11,16 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 import random
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--data-dir", default="/home/julian/ragroute/data/feb4rag_embeddings",
-                    help="Directory containing embeddings/ from prepare_feb4rag_data.py")
-parser.add_argument("--output-dir", default="/home/julian/ragroute/data/feb4rag_router",
-                    help="Directory to save trained model and split.json")
-args = parser.parse_args()
 
 def set_seed(seed=42):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)  # if using multi-GPU
+    torch.cuda.manual_seed_all(seed)
 
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-set_seed()
 
 def load_data(data_dir, output_dir, include_source_id=True, include_centroid=True):
     embeddings_dir = os.path.join(data_dir, "embeddings")
@@ -80,7 +72,6 @@ def load_data(data_dir, output_dir, include_source_id=True, include_centroid=Tru
                 parts.append(s_vec)
 
             x_new = np.concatenate(parts)
-            print(len(x_new))
             X_all.append(x_new)
             y_all.append(y)
         return np.array(X_all), np.array(y_all)
@@ -91,13 +82,7 @@ def load_data(data_dir, output_dir, include_source_id=True, include_centroid=Tru
 
     return (X_train, y_train), (X_val, y_val), (X_test, y_test), num_sources if include_source_id else 0
 
-include_source_id = True
-include_centroid = True
-os.makedirs(args.output_dir, exist_ok=True)
-(X_train, y_train), (X_val, y_val), (X_test, y_test), _ = load_data(
-    args.data_dir, args.output_dir, include_source_id, include_centroid)
 
-# === 4. Torch Dataset ===
 class RoutingDataset(Dataset):
     def __init__(self, X, y):
         self.X = torch.tensor(X, dtype=torch.float32)
@@ -106,11 +91,7 @@ class RoutingDataset(Dataset):
     def __len__(self): return len(self.X)
     def __getitem__(self, idx): return self.X[idx], self.y[idx]
 
-train_loader = DataLoader(RoutingDataset(X_train, y_train), batch_size=128, shuffle=True)
-val_loader   = DataLoader(RoutingDataset(X_val, y_val), batch_size=128)
-test_loader  = DataLoader(RoutingDataset(X_test, y_test), batch_size=128)
 
-# === 5. Model ===
 class CorpusRouter(nn.Module):
     def __init__(self, input_dim):
         super().__init__()
@@ -129,26 +110,8 @@ class CorpusRouter(nn.Module):
         x = self.dropout2(x)
         return self.fc3(x).squeeze()
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = CorpusRouter(input_dim=X_train.shape[1]).to(device)
 
-# === 6. Imbalance-aware loss ===
-pos_weight = torch.tensor([(len(y_train) - sum(y_train)) / sum(y_train)]).to(device)
-criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
-
-scheduler = torch.optim.lr_scheduler.CyclicLR(
-    optimizer,
-    base_lr=1e-3,
-    max_lr=5e-3,
-    step_size_up=10,
-    mode="triangular2",
-    cycle_momentum=False,
-)
-scheduler_fixed = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.05)
-
-# === 7. Evaluation ===
-def evaluate_with_metrics(loader, threshold=0.5):
+def evaluate_with_metrics(model, loader, device, threshold=0.5):
     print("THRESHOLD ", threshold)
     model.eval()
     all_preds, all_labels, all_probs = [], [], []
@@ -179,7 +142,7 @@ def evaluate_with_metrics(loader, threshold=0.5):
     num_pred_positives = sum(all_preds)
     reduction_pred = 1 - (num_pred_positives / num_total)
     reduction_true = 1 - (num_true_positives / num_total)
-    
+
     print(f"Total test instances: {num_total}")
     print(f"Ground-truth positives: {int(num_true_positives)}, reduction {reduction_true*100}")
     print(f"Predicted positives:   {int(num_pred_positives)}, reduction {reduction_pred*100}")
@@ -187,46 +150,98 @@ def evaluate_with_metrics(loader, threshold=0.5):
     print(f"Acc: {acc:.2%} | Prec: {prec:.2%} | Recall: {recall:.2%} | F1: {f1:.2%} | AUC: {auc:.2f}")
     return acc, prec, recall, f1, auc
 
-# === 8. Training Loop ===
-print("\nStarting training...")
-best_f1 = 0
-best_model_path = os.path.join(args.output_dir, "router_best_model.pt")
 
-num_epochs = 150
-for epoch in range(1, num_epochs + 1):
-    model.train()
-    total_loss = 0
+def train_router(data_dir, output_dir, include_source_id=True, include_centroid=True, num_epochs=150):
+    """Train a CorpusRouter model and save the best checkpoint.
 
-    for X, y in train_loader:
-        X, y = X.to(device), y.to(device)
-        optimizer.zero_grad()
-        logits = model(X)
-        loss = criterion(logits, y)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
+    Args:
+        data_dir: Directory containing embeddings/ from prepare_feb4rag_data.py
+        output_dir: Directory to save trained model and split.json
+        include_source_id: Include one-hot source ID in features
+        include_centroid: Include centroid embedding in features
+        num_epochs: Number of training epochs
 
-        if epoch < 115:
-            scheduler.step()
-        else:
-            scheduler_fixed.step()
+    Returns:
+        Tuple of (model, best_model_path, test_metrics) where test_metrics is
+        (acc, prec, recall, f1, auc).
+    """
+    set_seed()
 
-        total_loss += loss.item()
+    os.makedirs(output_dir, exist_ok=True)
+    (X_train, y_train), (X_val, y_val), (X_test, y_test), _ = load_data(
+        data_dir, output_dir, include_source_id, include_centroid)
 
-    avg_loss = total_loss / len(train_loader)
-    print(f"\nEpoch {epoch}: Train Loss = {avg_loss:.4f}")
-    print("Validation Set Metrics:")
-    acc, _, _, f1, _ = evaluate_with_metrics(val_loader)
+    train_loader = DataLoader(RoutingDataset(X_train, y_train), batch_size=128, shuffle=True)
+    val_loader   = DataLoader(RoutingDataset(X_val, y_val), batch_size=128)
+    test_loader  = DataLoader(RoutingDataset(X_test, y_test), batch_size=128)
 
-    # Save best model by F1 score
-    if acc > best_f1:
-        best_f1 = acc
-        torch.save(model.state_dict(), best_model_path)
-        print(f"New best model saved with F1 = {f1:.4f}")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = CorpusRouter(input_dim=X_train.shape[1]).to(device)
 
-model.load_state_dict(torch.load(best_model_path))
-print("\nLoaded best model from disk.")
-# === 9. Final Evaluation ===
-print("\nFinal Test Set Evaluation:")
-evaluate_with_metrics(test_loader)
+    pos_weight = torch.tensor([(len(y_train) - sum(y_train)) / sum(y_train)]).to(device)
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
 
+    scheduler = torch.optim.lr_scheduler.CyclicLR(
+        optimizer,
+        base_lr=1e-3,
+        max_lr=5e-3,
+        step_size_up=10,
+        mode="triangular2",
+        cycle_momentum=False,
+    )
+    scheduler_fixed = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.05)
+
+    print("\nStarting training...")
+    best_acc = 0
+    best_model_path = os.path.join(output_dir, "router_best_model.pt")
+
+    for epoch in range(1, num_epochs + 1):
+        model.train()
+        total_loss = 0
+
+        for X, y in train_loader:
+            X, y = X.to(device), y.to(device)
+            optimizer.zero_grad()
+            logits = model(X)
+            loss = criterion(logits, y)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+
+            if epoch < 115:
+                scheduler.step()
+            else:
+                scheduler_fixed.step()
+
+            total_loss += loss.item()
+
+        avg_loss = total_loss / len(train_loader)
+        print(f"\nEpoch {epoch}: Train Loss = {avg_loss:.4f}")
+        print("Validation Set Metrics:")
+        acc, _, _, f1, _ = evaluate_with_metrics(model, val_loader, device)
+
+        if acc > best_acc:
+            best_acc = acc
+            torch.save(model.state_dict(), best_model_path)
+            print(f"New best model saved with F1 = {f1:.4f}")
+
+    model.load_state_dict(torch.load(best_model_path))
+    print("\nLoaded best model from disk.")
+    print("\nFinal Test Set Evaluation:")
+    test_metrics = evaluate_with_metrics(model, test_loader, device)
+
+    return model, best_model_path, test_metrics
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data-dir", default="/home/julian/ragroute/data/feb4rag_embeddings",
+                        help="Directory containing embeddings/ from prepare_feb4rag_data.py")
+    parser.add_argument("--output-dir", default="/home/julian/ragroute/data/feb4rag_router",
+                        help="Directory to save trained model and split.json")
+    args = parser.parse_args()
+
+    train_router(args.data_dir, args.output_dir)
